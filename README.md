@@ -196,12 +196,12 @@ The current default configuration uses:
 ```text
 Chunk size       : 500
 Chunk overlap    : 50
+Embedding        : tfidf (offline)
 Retriever        : Hybrid
-Fusion           : RRF
-Hybrid alpha     : 0.5
-Top-K            : 5
-Reranking        : enabled
-Rerank Top-N     : 3
+Fusion           : RRF (k = 60)
+fetch_k          : 10 candidates per query variant
+Top-K            : 5 passages
+Reranking        : enabled (lexical; cross_encoder optional)
 Query rewriting  : none
 ```
 
@@ -256,9 +256,11 @@ The dense retrieval component represents text as continuous vector embeddings an
 
 The architecture provides an embedding abstraction supporting:
 
-* simulated embeddings
-* TF-IDF embeddings
-* Sentence Transformers-compatible embeddings
+* `tfidf` — TF-IDF + truncated SVD (latent semantic analysis), the offline default
+* `st-<model>` — any sentence-transformers bi-encoder, e.g. `st-BAAI/bge-small-en-v1.5`
+* `hashed` — bag-of-words feature hashing, a no-dependency lower bound (not semantic)
+
+There is no silent fallback: if a sentence-transformers model can't be loaded, the run fails loudly.
 
 This abstraction makes the retrieval layer independent of a specific embedding implementation.
 
@@ -335,7 +337,7 @@ Top-N Context
 Generation
 ```
 
-The reranker can be enabled or disabled through configuration, making it possible to quantify the quality gain versus additional latency.
+Two rerankers are available: `lexical` (offline — min-max-normalised first-stage score blended with query-word overlap) and `cross_encoder` (`cross-encoder/ms-marco-MiniLM-L-6-v2`, which reads query and passage jointly). Both rerank the fused candidates against the original query.
 
 ---
 
@@ -371,7 +373,7 @@ Original Query ──┼── Query B ──┼── Retrieval
                  └── Query C ──┘
 ```
 
-Retrieved results are merged and deduplicated before ranking.
+Each sub-query is retrieved separately and the result lists are merged with Reciprocal Rank Fusion.
 
 ### Step-Back
 
@@ -492,14 +494,13 @@ The project includes a built-in benchmark comparing several RAG architectures.
 
 The current comparison includes:
 
-| Strategy                           | Retrieval    | Reranker | Query Strategy |
-| ---------------------------------- | ------------ | -------- | -------------- |
-| Dense Vector                       | Dense        | ❌        | Direct         |
-| Sparse Keyword                     | BM25         | ❌        | Direct         |
-| Hybrid RRF                         | Dense + BM25 | ❌        | Direct         |
-| Hybrid + Reranker                  | Dense + BM25 | ✅        | Direct         |
-| Hybrid + Reranker + HyDE           | Dense + BM25 | ✅        | HyDE           |
-| Parent-Child + Hybrid + MultiQuery | Hybrid       | ✅        | MultiQuery     |
+| Strategy                 | Retrieval    | Reranker | Query Strategy |
+| ------------------------ | ------------ | -------- | -------------- |
+| Sparse Keyword (BM25)    | BM25         | ❌        | Direct         |
+| Dense Vector             | Dense        | ❌        | Direct         |
+| Hybrid RRF               | Dense + BM25 | ✅ RRF    | Direct         |
+| Hybrid + Reranker        | Dense + BM25 | ✅        | Direct         |
+| Hybrid + Reranker + HyDE | Dense + BM25 | ✅        | HyDE           |
 
 The same benchmark evaluates each architecture and reports:
 
@@ -519,37 +520,17 @@ This comparison is implemented both through the CLI and the FastAPI backend.
 
 The project includes a dedicated optimization engine for searching across RAG configurations.
 
-The current sweep space includes:
+The default sweep is an 18-configuration retrieval-tuning grid (`SweepSpace`):
 
 ```text
-Chunk sizes:
-    250
-    500
-    1000
-
-Retriever:
-    dense
-    bm25
-    hybrid
-
-Hybrid alpha:
-    0.3
-    0.5
-    0.7
-
-Query rewriting:
-    none
-    hyde
-    multi_query
-
-Reranking:
-    enabled
-    disabled
-
-Top-K:
-    3
-    5
+Retriever:        dense, hybrid
+Query expansion:  none, multi_query (aspect decomposition), keyword
+fetch_k:          5, 10, 20   (candidates retrieved per query variant before merging)
+Reranker:         off
+top_k:            5           (passages returned; NDCG@5 / Recall@5 are always computed at K = 5)
 ```
+
+Any field can be widened; if `max_evals` is smaller than the grid, a seeded random subsample is evaluated (not a truncation).
 
 The optimizer evaluates candidate configurations and identifies:
 
@@ -637,6 +618,50 @@ the pipeline executes:
 ```
 
 The pipeline also records the rewritten queries, retrieved chunks and timing information in the final `RAGPipelineResult`.
+
+---
+
+# 📊 Benchmark & Results
+
+**Benchmark** (`rag_engine/datasets/loader.py`): 14 hand-written documents and 12 queries. 10 documents are ground truth for at least one query; 4 are pure distractors (graph databases / small-world networks, relational parent-child tables, query autocomplete, network latency) that share vocabulary with an answer document. 7 of the 12 queries are multi-aspect and need two documents. Relevance is binary at document level; duplicate chunks of one document are counted once.
+
+**Architecture comparison** (`python cli.py compare`, offline: TF-IDF/SVD dense retrieval, lexical reranker, mock LLM):
+
+| Strategy | NDCG@5 | Recall@5 | MRR | P50 latency (ms) |
+| --- | --- | --- | --- | --- |
+| Sparse Keyword (BM25) | 0.943 | 1.000 | 0.958 | 1.81 |
+| Dense Vector | 0.919 | 1.000 | 0.917 | 2.51 |
+| Hybrid RRF (Dense + BM25) | 0.918 | 1.000 | 0.917 | 3.13 |
+| Hybrid + Reranker | 0.918 | 1.000 | 0.917 | 3.76 |
+| Hybrid + Reranker + HyDE | 0.842 | 0.917 | 0.903 | 4.44 |
+
+Same comparison with the hashed bag-of-words dense retriever (`--embedding hashed`):
+
+| Strategy | NDCG@5 | Recall@5 | MRR | P50 latency (ms) |
+| --- | --- | --- | --- | --- |
+| Sparse Keyword (BM25) | 0.943 | 1.000 | 0.958 | 1.84 |
+| Dense Vector | 0.683 | 0.750 | 0.708 | 1.54 |
+| Hybrid RRF (Dense + BM25) | 0.892 | 1.000 | 0.896 | 2.12 |
+| Hybrid + Reranker | 0.923 | 1.000 | 0.938 | 2.73 |
+| Hybrid + Reranker + HyDE | 0.876 | 1.000 | 0.903 | 3.43 |
+
+**Retrieval-tuning sweep** (`python cli.py sweep`, 18 configs): best `#1 dense|none|fetch5|rerank=False` at NDCG@5 0.919; worst `#5 dense|multi_query|fetch10|rerank=False` at 0.793. Full table in `results/sweep_tfidf.json`.
+
+**What the numbers say (honestly):**
+
+- On this small, lexically precise corpus BM25 is the strongest single retriever; hybrid RRF mainly helps when the dense retriever is weak (hashed: 0.684 → 0.892), and the reranker adds on top of that (→ 0.923).
+- Rule-based multi-query decomposition *hurts* here: generic sub-clauses ("how is it fused with dense results") pull in distractors. LLM-generated sub-queries (`--llm openai`) are the intended fix.
+- Offline HyDE uses a template "hypothetical document", which dilutes the query and lowers NDCG@5. Real HyDE needs a real LLM and adds one generation call per query.
+- Latencies are per query, in-process, on a ~20-chunk index with the mock LLM — they exclude real LLM generation.
+
+**Run with real models** (needs internet access to Hugging Face, and optionally an OpenAI-compatible key):
+
+```bash
+pip install sentence-transformers
+python cli.py --embedding st-BAAI/bge-small-en-v1.5 --reranker-type cross_encoder --out results/compare_bge_ce.json compare
+python cli.py --embedding st-BAAI/bge-small-en-v1.5 --out results/sweep_bge.json sweep
+OPENAI_API_KEY=... python cli.py --embedding st-BAAI/bge-small-en-v1.5 --reranker-type cross_encoder --llm openai compare
+```
 
 ---
 

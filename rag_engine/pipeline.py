@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from rag_engine.chunking.base import BaseChunker, Chunk
 from rag_engine.chunking import FixedWindowChunker, SentenceChunker, RecursiveChunker, ParentChildChunker, SemanticChunker
 from rag_engine.embeddings import BaseEmbeddingModel, SimulatedEmbeddingModel, TFIDFEmbeddingModel, SentenceTransformersEmbeddingModel
-from rag_engine.retrieval import BaseRetriever, DenseRetriever, BM25Retriever, HybridRetriever, Reranker, RetrievalResult
+from rag_engine.retrieval import BaseRetriever, DenseRetriever, BM25Retriever, HybridRetriever, LexicalOverlapReranker, CrossEncoderReranker, RetrievalResult
 from rag_engine.query_rewriting import BaseQueryRewriter, DirectQueryRewriter, HyDEQueryRewriter, MultiQueryRewriter, StepBackQueryRewriter, KeywordExpansionRewriter
 from rag_engine.generation import BaseLLMGenerator, MockLLMGenerator, OpenAICompatibleLLMGenerator, LLMResponse
 
@@ -14,15 +14,19 @@ class PipelineConfig(BaseModel):
     chunker_type: str = "fixed_window"  # fixed_window, sentence, recursive, parent_child, semantic
     chunk_size: int = 500
     chunk_overlap: int = 50
-    embedding_model_name: str = "bge-small-en-v1.5"
+    # "tfidf" (TF-IDF + truncated SVD, offline), "st-<hf model>" (sentence-transformers, e.g.
+    # "st-BAAI/bge-small-en-v1.5"), or "hashed" (bag-of-words feature hashing, smoke test only)
+    embedding_model_name: str = "tfidf"
     retriever_type: str = "hybrid"  # dense, bm25, hybrid
     fusion_mode: str = "rrf"  # rrf, weighted
     hybrid_alpha: float = 0.5
-    top_k: int = 5
+    top_k: int = 5            # passages returned to the LLM (and the K in NDCG@K / Recall@K)
+    fetch_k: int = 10         # candidates retrieved per (rewritten) query before merging / reranking
     enable_reranker: bool = True
-    rerank_top_n: int = 3
+    reranker_type: str = "lexical"   # "lexical" (offline) or "cross_encoder" (ms-marco-MiniLM-L-6-v2)
     query_rewriter_type: str = "none"  # none, hyde, multi_query, step_back, keyword
-    llm_model_name: str = "mock-gpt-4o-mini"
+    llm_backend: str = "mock"        # "mock" (offline template) or "openai" (OPENAI_API_KEY / OPENAI_BASE_URL)
+    llm_model_name: str = "gpt-4o-mini"
 
 class RAGPipelineResult(BaseModel):
     query: str
@@ -54,9 +58,11 @@ class RAGPipeline:
         if config.embedding_model_name == "tfidf":
             self.embedding_model = TFIDFEmbeddingModel()
         elif config.embedding_model_name.startswith("st-"):
-            self.embedding_model = SentenceTransformersEmbeddingModel(config.embedding_model_name.replace("st-", ""))
+            self.embedding_model = SentenceTransformersEmbeddingModel(config.embedding_model_name[3:])
+        elif config.embedding_model_name == "hashed":
+            self.embedding_model = SimulatedEmbeddingModel(model_name="hashed-bow-384")
         else:
-            self.embedding_model = SimulatedEmbeddingModel(model_name=config.embedding_model_name)
+            raise ValueError(f"Unknown embedding_model_name: {config.embedding_model_name}")
 
         # Instantiate Retriever
         self.dense_retriever = DenseRetriever(self.embedding_model)
@@ -75,16 +81,27 @@ class RAGPipeline:
             )
 
         # Reranker
-        self.reranker = Reranker() if config.enable_reranker else None
+        self.reranker = None
+        if config.enable_reranker:
+            self.reranker = CrossEncoderReranker() if config.reranker_type == "cross_encoder" else LexicalOverlapReranker()
 
         # LLM Generator
-        self.llm_generator = MockLLMGenerator(model_name=config.llm_model_name)
+        if config.llm_backend == "openai":
+            import os
+            key = os.environ.get("OPENAI_API_KEY")
+            if not key:
+                raise ValueError("llm_backend='openai' needs OPENAI_API_KEY")
+            self.llm_generator = OpenAICompatibleLLMGenerator(model_name=config.llm_model_name, api_key=key,
+                                                              base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"))
+        else:
+            self.llm_generator = MockLLMGenerator(model_name="mock-llm")
 
         # Query Rewriter
         if config.query_rewriter_type == "hyde":
             self.query_rewriter = HyDEQueryRewriter(llm_generator=self.llm_generator)
         elif config.query_rewriter_type == "multi_query":
-            self.query_rewriter = MultiQueryRewriter()
+            self.query_rewriter = MultiQueryRewriter(llm_generator=self.llm_generator,
+                                                     use_llm=config.llm_backend != "mock")
         elif config.query_rewriter_type == "step_back":
             self.query_rewriter = StepBackQueryRewriter()
         elif config.query_rewriter_type == "keyword":
@@ -112,24 +129,25 @@ class RAGPipeline:
         # 1. Query Rewriting
         rewritten_queries = self.query_rewriter.rewrite(query_text)
 
-        # 2. Retrieval
+        # 2. Retrieval: fetch_k candidates per rewritten query, merged with Reciprocal Rank Fusion
+        #    across query variants (rank-based, so per-variant score scales don't matter).
         t_ret_start = time.perf_counter()
-        retrieved_map: Dict[str, RetrievalResult] = {}
-
+        fused: Dict[str, float] = {}
+        chunk_by_id: Dict[str, Chunk] = {}
         for q in rewritten_queries:
-            res_list = self.retriever.retrieve(q, top_k=self.config.top_k)
-            for r in res_list:
+            for r in self.retriever.retrieve(q, top_k=self.config.fetch_k):
                 cid = r.chunk.chunk_id
-                if cid not in retrieved_map or r.score > retrieved_map[cid].score:
-                    retrieved_map[cid] = r
+                chunk_by_id[cid] = r.chunk
+                fused[cid] = fused.get(cid, 0.0) + 1.0 / (60 + r.rank)
+        ranked = sorted(fused.items(), key=lambda x: x[1], reverse=True)
+        candidates = [RetrievalResult(chunk=chunk_by_id[c], score=sc, rank=i)
+                      for i, (c, sc) in enumerate(ranked, start=1)]
 
-        combined_retrieved = list(retrieved_map.values())
-        combined_retrieved.sort(key=lambda x: x.score, reverse=True)
-        top_retrieved = combined_retrieved[: self.config.top_k]
-
-        # 3. Reranking
-        if self.reranker and top_retrieved:
-            top_retrieved = self.reranker.rerank(query_text, top_retrieved, top_n=self.config.rerank_top_n)
+        # 3. Reranking (scores the candidates against the ORIGINAL query), then keep top_k
+        if self.reranker and candidates:
+            top_retrieved = self.reranker.rerank(query_text, candidates, top_n=self.config.top_k)
+        else:
+            top_retrieved = candidates[: self.config.top_k]
 
         t_ret_end = time.perf_counter()
         retrieval_latency_ms = (t_ret_end - t_ret_start) * 1000.0

@@ -5,12 +5,16 @@ from rag_engine.pipeline import PipelineConfig, RAGPipeline
 from rag_engine.evaluator import RAGEvaluator, EvaluationReport, BenchmarkQuery
 
 class SweepSpace(BaseModel):
-    chunk_sizes: List[int] = [250, 500, 1000]
-    retriever_types: List[str] = ["dense", "bm25", "hybrid"]
-    hybrid_alphas: List[float] = [0.3, 0.5, 0.7]
-    query_rewriter_types: List[str] = ["none", "hyde", "multi_query"]
-    enable_reranker_options: List[bool] = [True, False]
-    top_k_options: List[int] = [3, 5]
+    """Grid of PipelineConfig fields to sweep. The default is the 18-config retrieval-tuning grid:
+    2 retrievers x 3 query-expansion strategies x 3 retrieval depths (fetch_k), no reranker."""
+    retriever_types: List[str] = ["dense", "hybrid"]
+    query_rewriter_types: List[str] = ["none", "multi_query", "keyword"]
+    fetch_k_options: List[int] = [5, 10, 20]
+    enable_reranker_options: List[bool] = [False]
+    chunk_sizes: List[int] = [500]
+    top_k_options: List[int] = [5]
+    embedding_model_name: str = "tfidf"
+    reranker_type: str = "lexical"
 
 class OptimizationReport(BaseModel):
     total_configs_evaluated: int
@@ -24,41 +28,30 @@ class RAGOptimizer:
         self.documents = documents
         self.benchmark_queries = benchmark_queries
 
-    def run_sweep(self, sweep_space: SweepSpace, max_evals: int = 10) -> OptimizationReport:
-        # Generate grid combinations
-        keys = ["chunk_size", "retriever_type", "hybrid_alpha", "query_rewriter_type", "enable_reranker", "top_k"]
-        values = [
-            sweep_space.chunk_sizes,
-            sweep_space.retriever_types,
-            sweep_space.hybrid_alphas,
-            sweep_space.query_rewriter_types,
-            sweep_space.enable_reranker_options,
-            sweep_space.top_k_options,
-        ]
-
-        all_combinations = list(itertools.product(*values))
-        # Limit max evals if combination space is huge
-        selected_combinations = all_combinations[:max_evals]
+    def run_sweep(self, sweep_space: SweepSpace, max_evals: int = None, seed: int = 42) -> OptimizationReport:
+        keys = ["retriever_type", "query_rewriter_type", "fetch_k", "enable_reranker", "chunk_size", "top_k"]
+        grid = list(itertools.product(sweep_space.retriever_types, sweep_space.query_rewriter_types,
+                                      sweep_space.fetch_k_options, sweep_space.enable_reranker_options,
+                                      sweep_space.chunk_sizes, sweep_space.top_k_options))
+        if max_evals is not None and max_evals < len(grid):
+            # Seeded random subsample instead of truncating the grid (truncation would only ever
+            # explore the first values of the outer loops).
+            import random
+            grid = random.Random(seed).sample(grid, max_evals)
 
         reports: List[EvaluationReport] = []
-
-        for idx, (cs, rt, ha, qr, er, tk) in enumerate(selected_combinations, start=1):
+        for idx, combo in enumerate(grid, start=1):
+            params = dict(zip(keys, combo))
             cfg = PipelineConfig(
-                name=f"Config #{idx} ({rt}-cs{cs}-ha{ha}-qr_{qr}-rerank_{er})",
-                chunk_size=cs,
-                retriever_type=rt,
-                hybrid_alpha=ha,
-                query_rewriter_type=qr,
-                enable_reranker=er,
-                top_k=tk,
+                name=f"#{idx} {params['retriever_type']}|{params['query_rewriter_type']}|fetch{params['fetch_k']}"
+                     f"|rerank={params['enable_reranker']}",
+                embedding_model_name=sweep_space.embedding_model_name,
+                reranker_type=sweep_space.reranker_type,
+                **params,
             )
-
             pipeline = RAGPipeline(cfg)
             pipeline.index_documents(self.documents)
-
-            evaluator = RAGEvaluator(pipeline)
-            report = evaluator.evaluate(self.benchmark_queries)
-            reports.append(report)
+            reports.append(RAGEvaluator(pipeline).evaluate(self.benchmark_queries))
 
         # Find best by NDCG
         best_ndcg = max(reports, key=lambda x: x.ndcg_at_k)
