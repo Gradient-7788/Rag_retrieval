@@ -4,81 +4,89 @@ import json
 from rag_engine import PipelineConfig, RAGPipeline, RAGEvaluator, RAGOptimizer, SweepSpace
 from rag_engine.datasets import BenchmarkDatasetLoader
 
+COMPARE = [
+    ("Sparse Keyword (BM25)", dict(retriever_type="bm25", enable_reranker=False)),
+    ("Dense Vector", dict(retriever_type="dense", enable_reranker=False)),
+    ("Hybrid RRF (Dense + BM25)", dict(retriever_type="hybrid", enable_reranker=False)),
+    ("Hybrid + Reranker", dict(retriever_type="hybrid", enable_reranker=True)),
+    ("Hybrid + Reranker + HyDE", dict(retriever_type="hybrid", enable_reranker=True, query_rewriter_type="hyde")),
+]
+
+
+def run(cfg, docs, queries):
+    p = RAGPipeline(cfg)
+    p.index_documents(docs)
+    return RAGEvaluator(p).evaluate(queries)
+
+
 def main():
     parser = argparse.ArgumentParser(description="RAG Benchmarking & Optimization Engine CLI")
-    subparsers = parser.add_subparsers(dest="command", help="Sub-command help")
+    parser.add_argument("--embedding", default="tfidf",
+                        help="tfidf (offline) | st-BAAI/bge-small-en-v1.5 (sentence-transformers) | hashed")
+    parser.add_argument("--reranker-type", default="lexical", choices=["lexical", "cross_encoder"])
+    parser.add_argument("--llm", default="mock", choices=["mock", "openai"], help="openai needs OPENAI_API_KEY")
+    parser.add_argument("--fetch-k", type=int, default=10)
+    parser.add_argument("--out", default=None, help="write JSON results to this file")
+    sub = parser.add_subparsers(dest="command")
 
-    # Evaluate command
-    eval_parser = subparsers.add_parser("evaluate", help="Run benchmark evaluation")
-    eval_parser.add_argument("--retriever", type=str, default="hybrid", choices=["dense", "bm25", "hybrid"])
-    eval_parser.add_argument("--chunker", type=str, default="fixed_window", choices=["fixed_window", "sentence", "recursive", "parent_child", "semantic"])
-    eval_parser.add_argument("--rewriter", type=str, default="none", choices=["none", "hyde", "multi_query", "step_back", "keyword"])
-    eval_parser.add_argument("--reranker", action="store_true", help="Enable reranking stage")
-
-    # Compare command
-    subparsers.add_parser("compare", help="Compare all baseline architectures side-by-side")
-
-    # Sweep command
-    sweep_parser = subparsers.add_parser("sweep", help="Run hyperparameter optimization sweep")
-    sweep_parser.add_argument("--evals", type=int, default=8, help="Number of evaluations to run")
-
+    ev = sub.add_parser("evaluate", help="Evaluate one pipeline")
+    ev.add_argument("--retriever", default="hybrid", choices=["dense", "bm25", "hybrid"])
+    ev.add_argument("--chunker", default="fixed_window", choices=["fixed_window", "sentence", "recursive", "parent_child", "semantic"])
+    ev.add_argument("--rewriter", default="none", choices=["none", "hyde", "multi_query", "step_back", "keyword"])
+    ev.add_argument("--reranker", action="store_true")
+    sub.add_parser("compare", help="Compare the 5 baseline architectures")
+    sw = sub.add_parser("sweep", help="Run the retrieval-tuning sweep (default 18 configs)")
+    sw.add_argument("--evals", type=int, default=None, help="random subsample of the grid")
     args = parser.parse_args()
 
     docs, queries = BenchmarkDatasetLoader.get_sample_tech_corpus()
+    common = dict(embedding_model_name=args.embedding, reranker_type=args.reranker_type,
+                  llm_backend=args.llm, fetch_k=args.fetch_k)
+    print(f"Benchmark: {len(docs)} documents, {len(queries)} queries "
+          f"({sum(len(q.ground_truth_doc_ids) > 1 for q in queries)} multi-aspect) | embedding={args.embedding} "
+          f"| reranker={args.reranker_type} | llm={args.llm}\n")
+    out = None
 
-    if args.command == "evaluate" or args.command is None:
-        cfg = PipelineConfig(
-            name="CLI Pipeline Run",
-            chunker_type=args.chunker if hasattr(args, 'chunker') else "fixed_window",
-            retriever_type=args.retriever if hasattr(args, 'retriever') else "hybrid",
-            query_rewriter_type=args.rewriter if hasattr(args, 'rewriter') else "none",
-            enable_reranker=args.reranker if hasattr(args, 'reranker') else True,
-        )
-        print(f"\n=======================================================")
-        print(f" RAG BENCHMARKING ENGINE: EVALUATING '{cfg.name}'")
-        print(f"=======================================================\n")
-        pipeline = RAGPipeline(cfg)
-        pipeline.index_documents(docs)
-        evaluator = RAGEvaluator(pipeline)
-        report = evaluator.evaluate(queries)
-
-        print(json.dumps(report.model_dump(), indent=2))
-
-    elif args.command == "compare":
-        print(f"\n=======================================================")
-        print(f" RAG BENCHMARKING ENGINE: COMPARATIVE BASELINE SWEEP")
-        print(f"=======================================================\n")
-
-        configs = [
-            PipelineConfig(name="Dense Vector (bge-small)", retriever_type="dense", enable_reranker=False),
-            PipelineConfig(name="Sparse Keyword (BM25)", retriever_type="bm25", enable_reranker=False),
-            PipelineConfig(name="Hybrid RRF (Dense + BM25)", retriever_type="hybrid", enable_reranker=False),
-            PipelineConfig(name="Hybrid + Reranker", retriever_type="hybrid", enable_reranker=True),
-            PipelineConfig(name="Hybrid + Reranker + HyDE", retriever_type="hybrid", enable_reranker=True, query_rewriter_type="hyde"),
-        ]
-
-        print(f"{'Strategy Name':<32} | {'NDCG@5':<8} | {'Recall@5':<8} | {'Faithful':<8} | {'P50 (ms)':<8} | {'Score':<6}")
-        print("-" * 82)
-
-        for cfg in configs:
-            pipeline = RAGPipeline(cfg)
-            pipeline.index_documents(docs)
-            evaluator = RAGEvaluator(pipeline)
-            rep = evaluator.evaluate(queries)
-            print(f"{rep.pipeline_name:<32} | {rep.ndcg_at_k:<8.4f} | {rep.recall_at_k:<8.4f} | {rep.faithfulness:<8.4f} | {rep.system_telemetry.latency_p50_ms:<8.2f} | {rep.composite_quality_score:<6.4f}")
-
-        print("-" * 82)
+    if args.command == "compare":
+        rows = []
+        print(f"{'Strategy':<28} | {'NDCG@5':>7} | {'Recall@5':>8} | {'MRR':>6} | {'P50 ms':>7} | {'P90 ms':>7}")
+        print("-" * 78)
+        for name, kw in COMPARE:
+            rep = run(PipelineConfig(name=name, **common, **kw), docs, queries)
+            t = rep.system_telemetry
+            print(f"{name:<28} | {rep.ndcg_at_k:>7.4f} | {rep.recall_at_k:>8.4f} | {rep.mrr:>6.3f} | "
+                  f"{t.latency_p50_ms:>7.2f} | {t.latency_p90_ms:>7.2f}")
+            rows.append({"strategy": name, "ndcg@5": rep.ndcg_at_k, "recall@5": rep.recall_at_k, "mrr": rep.mrr,
+                         "p50_ms": t.latency_p50_ms, "p90_ms": t.latency_p90_ms})
+        out = {"compare": rows}
 
     elif args.command == "sweep":
-        print(f"\n=======================================================")
-        print(f" RAG BENCHMARKING ENGINE: HYPERPARAMETER SWEEP")
-        print(f"=======================================================\n")
-        optimizer = RAGOptimizer(docs, queries)
-        sweep_report = optimizer.run_sweep(SweepSpace(), max_evals=args.evals)
-        print(f"Evaluated {sweep_report.total_configs_evaluated} configurations.")
-        print(f"Best Config by NDCG: {sweep_report.best_config_by_ndcg.pipeline_name} (NDCG: {sweep_report.best_config_by_ndcg.ndcg_at_k})")
-        print(f"Best Config by Composite Score: {sweep_report.best_config_by_composite.pipeline_name} (Score: {sweep_report.best_config_by_composite.composite_quality_score})")
-        print(f"Pareto Frontier count: {len(sweep_report.pareto_frontier_configs)} configs.")
+        space = SweepSpace(embedding_model_name=args.embedding, reranker_type=args.reranker_type)
+        rep = RAGOptimizer(docs, queries).run_sweep(space, max_evals=args.evals)
+        rows = sorted(rep.reports, key=lambda r: -r.ndcg_at_k)
+        for r in rows:
+            print(f"{r.pipeline_name:<48} NDCG@5 {r.ndcg_at_k:.4f} | Recall@5 {r.recall_at_k:.4f} | "
+                  f"P50 {r.system_telemetry.latency_p50_ms:.2f} ms")
+        print(f"\nEvaluated {rep.total_configs_evaluated} configs. Best by NDCG@5: "
+              f"{rep.best_config_by_ndcg.pipeline_name} ({rep.best_config_by_ndcg.ndcg_at_k}). "
+              f"Pareto frontier: {len(rep.pareto_frontier_configs)} configs.")
+        out = {"sweep": [{"config": r.pipeline_name, "ndcg@5": r.ndcg_at_k, "recall@5": r.recall_at_k,
+                          "p50_ms": r.system_telemetry.latency_p50_ms} for r in rows]}
+
+    else:
+        cfg = PipelineConfig(name="CLI Pipeline Run", **common,
+                             chunker_type=getattr(args, "chunker", "fixed_window"),
+                             retriever_type=getattr(args, "retriever", "hybrid"),
+                             query_rewriter_type=getattr(args, "rewriter", "none"),
+                             enable_reranker=getattr(args, "reranker", False))
+        rep = run(cfg, docs, queries)
+        out = rep.model_dump()
+        print(json.dumps(out, indent=2))
+
+    if args.out and out is not None:
+        with open(args.out, "w") as f:
+            json.dump(out, f, indent=2)
+
 
 if __name__ == "__main__":
     main()

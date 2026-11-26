@@ -1,0 +1,44 @@
+{
+  "compare": [
+    {
+      "strategy": "Sparse Keyword (BM25)",
+      "ndcg@5": 0.9434,
+      "recall@5": 1.0,
+      "mrr": 0.9583,
+      "p50_ms": 1.81,
+      "p90_ms": 1.87
+    },
+    {
+      "strategy": "Dense Vector",
+      "ndcg@5": 0.9193,
+      "recall@5": 1.0,
+      "mrr": 0.9167,
+      "p50_ms": 2.51,
+      "p90_ms": 2.53
+    },
+    {
+      "strategy": "Hybrid RRF (Dense + BM25)",
+      "ndcg@5": 0.918,
+      "recall@5": 1.0,
+      "mrr": 0.9167,
+      "p50_ms": 3.13,
+      "p90_ms": 3.22
+    },
+    {
+      "strategy": "Hybrid + Reranker",
+      "ndcg@5": 0.918,
+      "recall@5": 1.0,
+      "mrr": 0.9167,
+      "p50_ms": 3.76,
+      "p90_ms": 3.88
+    },
+    {
+      "strategy": "Hybrid + Reranker + HyDE",
+      "ndcg@5": 0.8416,
+      "recall@5": 0.9167,
+      "mrr": 0.9028,
+      "p50_ms": 4.44,
+      "p90_ms": 4.51
+    }
+  ]
+}

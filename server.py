@@ -84,14 +84,8 @@ def compare_baseline_strategies():
     """Runs out-of-the-box comparative benchmark across key RAG architecture choices."""
     docs, queries = active_documents, active_queries
 
-    configs = [
-        PipelineConfig(name="1. Dense Vector (bge-small)", retriever_type="dense", enable_reranker=False, query_rewriter_type="none"),
-        PipelineConfig(name="2. Sparse Keyword (BM25)", retriever_type="bm25", enable_reranker=False, query_rewriter_type="none"),
-        PipelineConfig(name="3. Hybrid RRF (Dense + BM25)", retriever_type="hybrid", fusion_mode="rrf", enable_reranker=False, query_rewriter_type="none"),
-        PipelineConfig(name="4. Hybrid + Reranker", retriever_type="hybrid", fusion_mode="rrf", enable_reranker=True, rerank_top_n=3, query_rewriter_type="none"),
-        PipelineConfig(name="5. Hybrid + Rerank + HyDE", retriever_type="hybrid", fusion_mode="rrf", enable_reranker=True, rerank_top_n=3, query_rewriter_type="hyde"),
-        PipelineConfig(name="6. Parent-Child + Hybrid + MultiQuery", chunker_type="parent_child", retriever_type="hybrid", enable_reranker=True, query_rewriter_type="multi_query"),
-    ]
+    from cli import COMPARE  # single source of truth for the 5 benchmarked architectures
+    configs = [PipelineConfig(name=f"{i}. {name}", **kw) for i, (name, kw) in enumerate(COMPARE, start=1)]
 
     reports = []
     for cfg in configs:

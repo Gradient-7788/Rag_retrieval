@@ -6,12 +6,8 @@ from sklearn.decomposition import TruncatedSVD
 from rag_engine.embeddings.base import BaseEmbeddingModel
 
 class SimulatedEmbeddingModel(BaseEmbeddingModel):
-    """
-    High-performance semantic embedding simulator.
-    Uses MD5/SHA256 text hashing combined with n-gram character/word frequency 
-    to generate realistic normalized dense vectors (768, 384, or 1536 dims).
-    Enables instant benchmark testing without heavy GPU dependencies.
-    """
+    """Hashed bag-of-words vectors (feature hashing with MD5). NOT a semantic model: it only
+    matches shared words. Kept as a smoke-test / lower-bound baseline that needs no dependencies."""
     def __init__(self, model_name: str = "bge-small-en-v1.5", dimension: int = 384):
         super().__init__(model_name, dimension)
         self.dimension = dimension
@@ -89,25 +85,17 @@ class TFIDFEmbeddingModel(BaseEmbeddingModel):
         return dense_vec.astype(np.float32)
 
 class SentenceTransformersEmbeddingModel(BaseEmbeddingModel):
-    """HuggingFace sentence-transformers integration wrapper with fallback to Simulated embedding."""
-    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
-        self.st_model = None
-        dim = 384
-        try:
-            from sentence_transformers import SentenceTransformer
-            self.st_model = SentenceTransformer(model_name)
-            dim = self.st_model.get_sentence_embedding_dimension()
-        except Exception:
-            self.simulated = SimulatedEmbeddingModel(model_name=model_name, dimension=384)
-            dim = 384
-        super().__init__(model_name, dim)
+    """HuggingFace sentence-transformers bi-encoder (e.g. BAAI/bge-small-en-v1.5).
+    Raises if the library or model is unavailable - it never silently falls back to a fake model."""
+    def __init__(self, model_name: str = "BAAI/bge-small-en-v1.5"):
+        from sentence_transformers import SentenceTransformer
+        self.st_model = SentenceTransformer(model_name)
+        super().__init__(model_name, self.st_model.get_sentence_embedding_dimension())
 
     def embed_texts(self, texts: List[str]) -> np.ndarray:
-        if self.st_model is not None:
-            return self.st_model.encode(texts, normalize_embeddings=True)
-        return self.simulated.embed_texts(texts)
+        if not texts:
+            return np.empty((0, self.dimension), dtype=np.float32)
+        return np.asarray(self.st_model.encode(texts, normalize_embeddings=True), dtype=np.float32)
 
     def embed_query(self, query: str) -> np.ndarray:
-        if self.st_model is not None:
-            return self.st_model.encode([query], normalize_embeddings=True)[0]
-        return self.simulated.embed_query(query)
+        return np.asarray(self.st_model.encode([query], normalize_embeddings=True)[0], dtype=np.float32)

@@ -1,0 +1,112 @@
+{
+  "sweep": [
+    {
+      "config": "#1 dense|none|fetch5|rerank=False",
+      "ndcg@5": 0.9193,
+      "recall@5": 1.0,
+      "p50_ms": 2.45
+    },
+    {
+      "config": "#2 dense|none|fetch10|rerank=False",
+      "ndcg@5": 0.9193,
+      "recall@5": 1.0,
+      "p50_ms": 2.55
+    },
+    {
+      "config": "#3 dense|none|fetch20|rerank=False",
+      "ndcg@5": 0.9193,
+      "recall@5": 1.0,
+      "p50_ms": 2.67
+    },
+    {
+      "config": "#7 dense|keyword|fetch5|rerank=False",
+      "ndcg@5": 0.9193,
+      "recall@5": 1.0,
+      "p50_ms": 3.62
+    },
+    {
+      "config": "#8 dense|keyword|fetch10|rerank=False",
+      "ndcg@5": 0.9193,
+      "recall@5": 1.0,
+      "p50_ms": 5.98
+    },
+    {
+      "config": "#9 dense|keyword|fetch20|rerank=False",
+      "ndcg@5": 0.9193,
+      "recall@5": 1.0,
+      "p50_ms": 5.04
+    },
+    {
+      "config": "#10 hybrid|none|fetch5|rerank=False",
+      "ndcg@5": 0.918,
+      "recall@5": 1.0,
+      "p50_ms": 3.52
+    },
+    {
+      "config": "#11 hybrid|none|fetch10|rerank=False",
+      "ndcg@5": 0.918,
+      "recall@5": 1.0,
+      "p50_ms": 4.78
+    },
+    {
+      "config": "#12 hybrid|none|fetch20|rerank=False",
+      "ndcg@5": 0.918,
+      "recall@5": 1.0,
+      "p50_ms": 3.84
+    },
+    {
+      "config": "#16 hybrid|keyword|fetch5|rerank=False",
+      "ndcg@5": 0.918,
+      "recall@5": 1.0,
+      "p50_ms": 4.99
+    },
+    {
+      "config": "#17 hybrid|keyword|fetch10|rerank=False",
+      "ndcg@5": 0.918,
+      "recall@5": 1.0,
+      "p50_ms": 5.05
+    },
+    {
+      "config": "#18 hybrid|keyword|fetch20|rerank=False",
+      "ndcg@5": 0.918,
+      "recall@5": 1.0,
+      "p50_ms": 4.96
+    },
+    {
+      "config": "#13 hybrid|multi_query|fetch5|rerank=False",
+      "ndcg@5": 0.9113,
+      "recall@5": 1.0,
+      "p50_ms": 6.55
+    },
+    {
+      "config": "#15 hybrid|multi_query|fetch20|rerank=False",
+      "ndcg@5": 0.9056,
+      "recall@5": 1.0,
+      "p50_ms": 6.6
+    },
+    {
+      "config": "#4 dense|multi_query|fetch5|rerank=False",
+      "ndcg@5": 0.8982,
+      "recall@5": 1.0,
+      "p50_ms": 4.6
+    },
+    {
+      "config": "#6 dense|multi_query|fetch20|rerank=False",
+      "ndcg@5": 0.8669,
+      "recall@5": 0.9583,
+      "p50_ms": 4.8
+    },
+    {
+      "config": "#14 hybrid|multi_query|fetch10|rerank=False",
+      "ndcg@5": 0.8638,
+      "recall@5": 0.9167,
+      "p50_ms": 6.54
+    },
+    {
+      "config": "#5 dense|multi_query|fetch10|rerank=False",
+      "ndcg@5": 0.7928,
+      "recall@5": 0.8333,
+      "p50_ms": 4.67
+    }
+  ]
+}

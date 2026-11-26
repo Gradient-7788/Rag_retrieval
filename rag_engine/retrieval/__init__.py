@@ -4,6 +4,8 @@ from rag_engine.retrieval.implementations import (
     BM25Retriever,
     HybridRetriever,
     Reranker,
+    LexicalOverlapReranker,
+    CrossEncoderReranker,
 )
 
 __all__ = [
@@ -13,4 +15,6 @@ __all__ = [
     "BM25Retriever",
     "HybridRetriever",
     "Reranker",
+    "LexicalOverlapReranker",
+    "CrossEncoderReranker",
 ]

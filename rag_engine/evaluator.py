@@ -38,8 +38,9 @@ class EvaluationReport(BaseModel):
     system_telemetry: SystemTelemetry
 
 class RAGEvaluator:
-    def __init__(self, pipeline: RAGPipeline):
+    def __init__(self, pipeline: RAGPipeline, eval_k: int = 5):
         self.pipeline = pipeline
+        self.eval_k = eval_k  # fixed K for Recall@K / NDCG@K, independent of the pipeline's top_k
         self.system_tracker = SystemTracker()
 
     def evaluate(self, benchmark_queries: List[BenchmarkQuery]) -> EvaluationReport:
@@ -69,14 +70,15 @@ class RAGEvaluator:
 
             # Retrieved doc/chunk IDs
             retrieved_chunk_ids = [r.chunk.chunk_id for r in res.retrieved_chunks]
-            retrieved_doc_ids = [r.chunk.doc_id for r in res.retrieved_chunks]
+            # Several chunks can come from the same document: keep each document once, at its best rank
+            retrieved_doc_ids = list(dict.fromkeys(r.chunk.doc_id for r in res.retrieved_chunks))
 
             gt_doc_ids = b_q.ground_truth_doc_ids
             # Use chunk ground truth if available, otherwise doc ground truth
             gt_ids = b_q.ground_truth_chunk_ids if b_q.ground_truth_chunk_ids else gt_doc_ids
             ret_ids = retrieved_chunk_ids if b_q.ground_truth_chunk_ids else retrieved_doc_ids
 
-            k = self.pipeline.config.top_k
+            k = self.eval_k
 
             # Calculate retrieval metrics
             recalls.append(recall_at_k(ret_ids, gt_ids, k))

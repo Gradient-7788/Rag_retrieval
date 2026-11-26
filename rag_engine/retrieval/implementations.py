@@ -152,37 +152,48 @@ class HybridRetriever(BaseRetriever):
             )
         return results
 
-class Reranker:
-    """
-    Reranker using cross-encoder scoring logic or fine-grained word/semantic overlap reranking.
-    """
-    def __init__(self, reranker_model_name: str = "ms-marco-MiniLM-L-6-v2"):
-        self.model_name = reranker_model_name
+class LexicalOverlapReranker:
+    """Offline, dependency-free reranker: blends the min-max normalised first-stage score with the
+    fraction of query words that appear in the passage. A cheap stand-in for a cross-encoder."""
+    name = "lexical"
+
+    def __init__(self, weight_overlap: float = 0.4):
+        self.weight_overlap = weight_overlap
 
     def rerank(self, query: str, results: List[RetrievalResult], top_n: int = 5) -> List[RetrievalResult]:
         if not results:
             return []
+        q_words = set(re.findall(r'\w+', query.lower()))
+        scores = np.array([r.score for r in results], dtype=float)
+        rng = scores.max() - scores.min()
+        norm = (scores - scores.min()) / rng if rng > 1e-12 else np.ones_like(scores)
+        scored = []
+        for r, n in zip(results, norm):
+            words = set(re.findall(r'\w+', r.chunk.text.lower()))
+            overlap = len(q_words & words) / max(1, len(q_words))
+            scored.append((r.chunk, (1 - self.weight_overlap) * n + self.weight_overlap * overlap))
+        scored.sort(key=lambda x: x[1], reverse=True)
+        return [RetrievalResult(chunk=c, score=float(sc), rank=i) for i, (c, sc) in enumerate(scored[:top_n], start=1)]
 
-        query_words = set(re.findall(r'\w+', query.lower()))
-        reranked = []
 
-        for r in results:
-            text_words = set(re.findall(r'\w+', r.chunk.text.lower()))
-            overlap = len(query_words.intersection(text_words)) / max(1, len(query_words))
-            # Blend initial retrieval score with lexical exact-match overlap score
-            new_score = 0.6 * r.score + 0.4 * overlap
-            reranked.append((r.chunk, new_score))
+class CrossEncoderReranker:
+    """Real cross-encoder reranker (sentence-transformers CrossEncoder). Scores (query, passage)
+    jointly; requires the model to be downloadable / cached locally. No silent fallback."""
+    name = "cross_encoder"
 
-        reranked.sort(key=lambda x: x[1], reverse=True)
-        final_n = reranked[:top_n]
+    def __init__(self, model_name: str = "cross-encoder/ms-marco-MiniLM-L-6-v2"):
+        from sentence_transformers import CrossEncoder  # raises ImportError if not installed
+        self.model_name = model_name
+        self.model = CrossEncoder(model_name)
 
-        output = []
-        for rank, (chunk, score) in enumerate(final_n, start=1):
-            output.append(
-                RetrievalResult(
-                    chunk=chunk,
-                    score=float(score),
-                    rank=rank,
-                )
-            )
-        return output
+    def rerank(self, query: str, results: List[RetrievalResult], top_n: int = 5) -> List[RetrievalResult]:
+        if not results:
+            return []
+        scores = self.model.predict([(query, r.chunk.text) for r in results])
+        order = np.argsort(-np.asarray(scores))[:top_n]
+        return [RetrievalResult(chunk=results[i].chunk, score=float(scores[i]), rank=k)
+                for k, i in enumerate(order, start=1)]
+
+
+# Backwards-compatible alias
+Reranker = LexicalOverlapReranker
